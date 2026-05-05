@@ -1,0 +1,130 @@
+import streamlit as st
+import asyncio
+import json
+import os
+import sys
+import time
+
+# Permet d'importer le module backend correctement si lancé depuis la racine
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Tentative d'importation de tes agents et de ta config
+try:
+    from backend.agents.agent_silobreak import run_silobreak_agent
+    from backend.agents.agent_legal import run_legal_agent
+    from backend.agents.agent_executive import run_executive_agent
+    from backend.agents.agent_operations import run_operations_agent
+    from backend.agents.agent_evidence import run_evidence_agent
+    from backend.agents.agent_orchestrator import run_orchestrator_agent
+    from backend.config import settings
+except ImportError as e:
+    st.error(f"⚠️ Erreur d'importation. Assurez-vous de placer ce fichier à la racine de votre projet (au-dessus du dossier 'backend'). Détails : {e}")
+    st.stop()
+
+# --- Configuration de la page ---
+st.set_page_config(page_title="Testeur Agents - BNP Paribas", page_icon="🏦", layout="wide")
+st.title("🧪 Testeur de Pipeline Agents (Adverse News)")
+st.markdown("Interface de test isolée pour le réseau d'agents LLM. La base de données est ignorée pour ce test.")
+
+# --- Barre latérale : Inputs ---
+with st.sidebar:
+    st.header("Paramètres de l'analyse")
+    company_name = st.text_input("Nom de l'entreprise", value="Binance")
+    domain = st.text_input("Domaine (optionnel)", value="binance.com")
+    
+    st.divider()
+    st.subheader("Configuration API")
+    api_key = st.text_input("Clé API Anthropic", type="password", help="Laisse vide si déjà configuré dans ton .env")
+    
+    if api_key:
+        # Override de la clé API à la volée pour le test
+        settings.ANTHROPIC_API_KEY = api_key
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+
+    run_button = st.button("🚀 Lancer l'analyse", use_container_width=True, type="primary")
+
+# --- Logique asynchrone pour exécuter les agents ---
+async def execute_pipeline(company, domain):
+    try:
+        # 1. Silobreak (Agent 1)
+        with st.status("Agent 1 : Acquisition & Triage (Silobreak)...", expanded=True) as status_1:
+            start_time = time.time()
+            triage_data = await run_silobreak_agent(company, domain)
+            st.json(triage_data, expanded=False)
+            status_1.update(label=f"✅ Agent 1 terminé ({time.time() - start_time:.2f}s)", state="complete", expanded=False)
+
+        # 2, 3, 4. Agents analytiques en parallèle
+        with st.status("Agents 2, 3, 4 : Analyses par piliers (Exécution parallèle)...", expanded=True) as status_parallel:
+            start_time = time.time()
+            
+            # On lance les tâches en parallèle comme dans ton pipeline.py
+            legal_task = run_legal_agent(company, triage_data)
+            executive_task = run_executive_agent(company, triage_data)
+            operations_task = run_operations_agent(company, triage_data)
+            
+            legal_analysis, executive_analysis, operations_analysis = await asyncio.gather(
+                legal_task, executive_task, operations_task
+            )
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.subheader("Agent 2 (Légal)")
+                st.json(legal_analysis, expanded=False)
+            with col2:
+                st.subheader("Agent 3 (Exécutif)")
+                st.json(executive_analysis, expanded=False)
+            with col3:
+                st.subheader("Agent 4 (Opérations)")
+                st.json(operations_analysis, expanded=False)
+                
+            status_parallel.update(label=f"✅ Agents 2, 3, 4 terminés ({time.time() - start_time:.2f}s)", state="complete", expanded=False)
+
+        # 5. Evidence Agent (Agent 5)
+        with st.status("Agent 5 : Validation des preuves (Fact-Checker)...", expanded=True) as status_5:
+            start_time = time.time()
+            evidence_validation = await run_evidence_agent(
+                company, triage_data, legal_analysis, executive_analysis, operations_analysis
+            )
+            st.json(evidence_validation, expanded=False)
+            status_5.update(label=f"✅ Agent 5 terminé ({time.time() - start_time:.2f}s)", state="complete", expanded=False)
+
+        # 6. Orchestrateur (Agent 6)
+        with st.status("Agent 6 : Synthèse Finale et Scoring...", expanded=True) as status_6:
+            start_time = time.time()
+            final_report = await run_orchestrator_agent(
+                company, domain, triage_data, legal_analysis, executive_analysis, operations_analysis, evidence_validation
+            )
+            status_6.update(label=f"✅ Agent 6 terminé ({time.time() - start_time:.2f}s)", state="complete", expanded=False)
+
+        # --- Affichage des résultats finaux ---
+        st.success("🎉 Pipeline exécuté avec succès !")
+        
+        # Mise en évidence du score
+        score = final_report.get("cyber_vulnerability_score", 0)
+        risk_level = final_report.get("risk_level", "UNKNOWN")
+        
+        # Choix de la couleur en fonction du risque
+        color = "red" if risk_level == "HIGH" else "orange" if risk_level == "MEDIUM" else "green"
+        
+        st.markdown(f"""
+        <div style="text-align: center; padding: 2rem; border-radius: 10px; background-color: rgba(0,0,0,0.1);">
+            <h2>Score de Vulnérabilité : <span style="color: {color}; font-size: 3rem;">{score}/100</span></h2>
+            <h3>Niveau de Risque : <span style="color: {color};">{risk_level}</span></h3>
+            <p><strong>Recommandation :</strong> {final_report.get("decision_intelligence", "N/A")}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.subheader("Rapport JSON Final")
+        st.json(final_report)
+
+    except Exception as e:
+        st.error(f"Une erreur est survenue durant l'exécution : {e}")
+        st.exception(e)
+
+# --- Point d'entrée de l'UI ---
+if run_button:
+    if not settings.ANTHROPIC_API_KEY and not api_key:
+        st.warning("⚠️ Attention : Aucune clé API Anthropic n'a été détectée. Remplissez le champ dans la barre latérale ou configurez votre fichier .env.")
+    else:
+        # Exécution de la fonction asynchrone dans l'environnement synchrone de Streamlit
+        asyncio.run(execute_pipeline(company_name, domain))
