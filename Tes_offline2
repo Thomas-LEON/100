@@ -1,0 +1,169 @@
+import streamlit as st
+import asyncio
+import sys
+import os
+import types
+import json
+import time
+import importlib.util
+
+# =====================================================================
+# 🛠️ MOCKING & ENVIRONNEMENT (Identique, pour la stabilité)
+# =====================================================================
+if "backend" not in sys.modules: sys.modules["backend"] = types.ModuleType("backend")
+if "backend.config" not in sys.modules:
+    config_mod = types.ModuleType("backend.config")
+    class MockSettings:
+        ANTHROPIC_API_KEY = "mocked"
+        SILOBREAK_API_KEY = "mocked"
+        SILOBREAK_BASE_URL = "http://mock"
+    config_mod.settings = MockSettings()
+    sys.modules["backend.config"] = config_mod
+
+# Injection des fausses lib pour éviter les erreurs d'import au bureau
+for mod_name in ["httpx", "anthropic"]:
+    if mod_name not in sys.modules:
+        mock_mod = types.ModuleType(mod_name)
+        if mod_name == "httpx":
+            class MockClient:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *args): pass
+                async def get(self, *args, **kwargs):
+                    class Resp:
+                        def raise_for_status(self): pass
+                        def json(self): return {"status": "mocked", "results": []}
+                    return Resp()
+            mock_mod.AsyncClient = MockClient
+            mock_mod.HTTPError = Exception
+        else: # anthropic
+            class MockMsg:
+                def __init__(self, t): self.content = [types.SimpleNamespace(text=t)]
+            class MockAPI:
+                def create(self, **kwargs):
+                    time.sleep(1.2) # Pour l'effet "temps réel"
+                    s = kwargs.get('system', '')
+                    if "Agent 1" in s: return MockMsg('{"company": "Binance Corp", "signals": [{"category": "CAT1", "severity": 5, "summary": "Enquête DOJ"}, {"category": "CAT4", "severity": 4, "summary": "Faille technique"}], "highest_severity": 5, "triage_summary": "Alerte critique détectée."}')
+                    if "Agent 2" in s: return MockMsg('{"agent": "Legal", "legal_risk_score": 92, "recommendation": "AVOID"}')
+                    if "Agent 3" in s: return MockMsg('{"agent": "Executive", "combined_score": 65, "recommendation": "CAUTION"}')
+                    if "Agent 4" in s: return MockMsg('{"agent": "Operations", "combined_score": 85, "recommendation": "AVOID"}')
+                    if "Agent 5" in s: return MockMsg('{"overall_evidence_quality": "HIGH", "score_validation": {"legal_score_validated": 92, "executive_score_validated": 65, "operations_score_validated": 85}}')
+                    if "Agent 6" in s: return MockMsg('{"risk_level": "HIGH", "decision_intelligence": "AVOID", "executive_summary": "Risque majeur identifié sur les piliers régulatoires et opérationnels.", "top_issues": ["Enquête criminelle DOJ", "Insolvabilité technique"]}')
+                    return MockMsg('{}')
+            class MockCli:
+                def __init__(self, **kwargs): self.messages = MockAPI()
+            mock_mod.Anthropic = MockCli
+        sys.modules[mod_name] = mock_mod
+
+# Chargement des agents
+def load_agent(name):
+    path = os.path.join(os.path.dirname(__file__), f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"backend.agents.{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[f"backend.agents.{name}"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+a1, a2, a3, a4, a5, a6 = [load_agent(n) for n in ["agent_silobreak", "agent_legal", "agent_executive", "agent_operations", "agent_evidence", "agent_orchestrator"]]
+
+# =====================================================================
+# 🎨 INTERFACE EXECUTIVE (LA DÉMO)
+# =====================================================================
+st.set_page_config(page_title="BNP Paribas - Adverse News AI", page_icon="🏦", layout="wide")
+
+# Custom CSS pour le look & feel professionnel
+st.markdown("""
+    <style>
+    .agent-card { background-color: #262730; border-left: 5px solid #00a082; padding: 15px; border-radius: 5px; margin-bottom: 10px; }
+    .status-text { font-size: 0.9rem; color: #9ea0a3; }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("🏦 Emerging Tech & Threat Intel - Dashboard")
+st.subheader("Pipeline Multi-Agents d'Analyse Adverse News")
+
+with st.sidebar:
+    st.image("https://www.bnpparibas.pt/en/wp-content/uploads/sites/4/2016/05/Logo-BNP-Paribas.png", width=200)
+    st.divider()
+    target = st.text_input("Entité à screener", "Binance")
+    run = st.button("Lancer l'Audit IA", type="primary", use_container_width=True)
+    st.info("💡 Mode démo offline : Les comportements des agents sont simulés pour valider la logique de scoring.")
+
+if run:
+    # --- Progress Bar Globale ---
+    progress_bar = st.progress(0, text="Initialisation du pipeline...")
+    
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.write("### ⚙️ Workflow en Temps Réel")
+        
+        # Etape 1
+        with st.container():
+            st.markdown('<div class="agent-card"><b>Agent 1 : Silobreak Acquisition</b><br><span class="status-text">Collecte OSINT et Triage initial (Date > 2020)</span></div>', unsafe_allow_html=True)
+            triage = asyncio.run(a1.run_silobreak_agent(target))
+            st.success("Données collectées.")
+            progress_bar.progress(20, "Analyse des piliers de risque...")
+
+        # Etape 2, 3, 4 en Parallèle
+        st.markdown('<div class="agent-card"><b>Agents 2-4 : Analyse Multi-Piliers</b><br><span class="status-text">Analyses Légale, Executive et Opérationnelle en simultané</span></div>', unsafe_allow_html=True)
+        l_task = a2.run_legal_agent(target, triage)
+        e_task = a3.run_executive_agent(target, triage)
+        o_task = a4.run_operations_agent(target, triage)
+        
+        legal, exec_res, ops = asyncio.run(asyncio.gather(l_task, e_task, o_task))
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Légal", f"{legal.get('legal_risk_score')}/100")
+        c2.metric("Exec", f"{exec_res.get('combined_score')}/100")
+        c3.metric("Ops", f"{ops.get('combined_score')}/100")
+        progress_bar.progress(60, "Validation des preuves...")
+
+        # Etape 5
+        st.markdown('<div class="agent-card"><b>Agent 5 : Evidence Agent</b><br><span class="status-text">Fact-checking, filtrage des hallucinations et validation des dates</span></div>', unsafe_allow_html=True)
+        evidence = asyncio.run(a5.run_evidence_agent(target, triage, legal, exec_res, ops))
+        st.info(f"Qualité des preuves : {evidence.get('overall_evidence_quality')}")
+        progress_bar.progress(80, "Synthèse finale...")
+
+        # Etape 6
+        st.markdown('<div class="agent-card" style="border-left-color: #ff4b4b;"><b>Agent 6 : Orchestrateur</b><br><span class="status-text">Calcul du Cyber Vulnerability Score (CVS) et recommandations</span></div>', unsafe_allow_html=True)
+        final = asyncio.run(a6.run_orchestrator_agent(target, "", triage, legal, exec_res, ops, evidence))
+        progress_bar.progress(100, "Audit terminé.")
+
+    with col_right:
+        st.write("### 📊 Rapport de Synthèse")
+        
+        score = final.get("cyber_vulnerability_score")
+        risk = final.get("risk_level")
+        color = "#ff4b4b" if risk == "HIGH" else "#ffa500" if risk == "MEDIUM" else "#00a082"
+        
+        st.markdown(f"""
+            <div style="text-align:center; padding:30px; border:2px solid {color}; border-radius:10px;">
+                <h1 style="color:{color}; margin:0;">{score}/100</h1>
+                <p style="font-size:1.5rem; color:{color};">RISQUE {risk}</p>
+                <hr>
+                <p style="font-size:1.1rem;"><b>Décision : {final.get('decision_intelligence')}</b></p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        st.write("#### 📝 Résumé Exécutif")
+        st.write(final.get("executive_summary"))
+        
+        st.write("#### 🚩 Points de Vigilance")
+        for issue in final.get("top_issues", []):
+            st.warning(issue)
+
+        with st.expander("Voir le flux JSON complet (Audit Trail)"):
+            st.json(final)
+
+else:
+    # État initial : Expliquer le concept
+    st.write("---")
+    st.write("#### Architecture du Système")
+    st.markdown("""
+    1. **Extraction** : Collecte des signaux faibles via API Silobreak.
+    2. **Analyse Parallèle** : Trois experts IA analysent les risques réglementaires, de leadership et de sécurité.
+    3. **Vérification** : Un agent dédié valide la véracité et la fraîcheur des données.
+    4. **Synthèse** : L'orchestrateur produit le score final et l'intelligence décisionnelle.
+    """)
+    # On ajoute une image de concept pour le boss
+    st.write("")
