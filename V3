@@ -1,0 +1,218 @@
+import streamlit as st
+import asyncio
+import sys
+import os
+import types
+import json
+import time
+import importlib.util
+
+# =====================================================================
+# 🛠️ MOCKING ULTRA-ROBUSTE & SCÉNARIOS VARIABLES
+# =====================================================================
+
+if "backend" not in sys.modules: sys.modules["backend"] = types.ModuleType("backend")
+if "backend.config" not in sys.modules:
+    config_mod = types.ModuleType("backend.config")
+    class MockSettings:
+        ANTHROPIC_API_KEY = "offline-mock"
+        SILOBREAK_API_KEY = "offline-mock"
+        SILOBREAK_BASE_URL = "http://mock"
+    config_mod.settings = MockSettings()
+    sys.modules["backend.config"] = config_mod
+
+def get_mock_scenario(full_user_prompt, agent_system_prompt):
+    # full_user_prompt contient TOUT le message envoyé à l'IA.
+    # On isole uniquement l'en-tête (les 150 premiers caractères) là où tu 
+    # injectes dynamiquement le nom de la cible : "Analysis for: {company_name}"
+    # Cela évite les faux positifs avec tes instructions "e.g., Binance, FTX".
+    header = full_user_prompt[:150].upper()
+    
+    # SCÉNARIO A : CRITIQUE (ex: FTX, Binance)
+    if "FTX" in header or "BINANCE" in header:
+        if "Agent 1" in agent_system_prompt: return '{"total_signals": 15, "highest_severity": 5, "triage_summary": "Fraude massive détectée."}'
+        if "Agent 2" in agent_system_prompt: return '{"legal_risk_score": 95, "recommendation": "AVOID", "key_risk_flags": ["Enquête criminelle", "Blanchiment"]}'
+        if "Agent 3" in agent_system_prompt: return '{"combined_score": 90, "recommendation": "AVOID", "key_risk_flags": ["CEO arrêté"]}'
+        if "Agent 4" in agent_system_prompt: return '{"combined_score": 100, "recommendation": "AVOID", "key_risk_flags": ["Faillite Chapitre 11"]}'
+        if "Agent 5" in agent_system_prompt: return '{"overall_evidence_quality": "HIGH", "verified_top_issues": ["Faillite", "Arrestation"]}'
+    
+    # SCÉNARIO B : SAIN (ex: Apple, Microsoft)
+    elif "APPLE" in header or "MICROSOFT" in header:
+        if "Agent 1" in agent_system_prompt: return '{"total_signals": 2, "highest_severity": 2, "triage_summary": "Quelques litiges mineurs."}'
+        if "Agent 2" in agent_system_prompt: return '{"legal_risk_score": 15, "recommendation": "CLEAR", "key_risk_flags": ["Litige IP mineur"]}'
+        if "Agent 3" in agent_system_prompt: return '{"combined_score": 10, "recommendation": "CLEAR", "key_risk_flags": []}'
+        if "Agent 4" in agent_system_prompt: return '{"combined_score": 5, "recommendation": "CLEAR", "key_risk_flags": []}'
+        if "Agent 5" in agent_system_prompt: return '{"overall_evidence_quality": "HIGH", "verified_top_issues": []}'
+    
+    # SCÉNARIO C : MITIGÉ (ex: Tesla)
+    else:
+        if "Agent 1" in agent_system_prompt: return '{"total_signals": 5, "highest_severity": 3, "triage_summary": "Polémiques exécutives et rappels produits."}'
+        if "Agent 2" in agent_system_prompt: return '{"legal_risk_score": 40, "recommendation": "MONITOR", "key_risk_flags": ["Amende SEC passée"]}'
+        if "Agent 3" in agent_system_prompt: return '{"combined_score": 80, "recommendation": "CAUTION", "key_risk_flags": ["Risque Homme-Clé"]}'
+        if "Agent 4" in agent_system_prompt: return '{"combined_score": 30, "recommendation": "MONITOR", "key_risk_flags": ["Rappels sécurité"]}'
+        if "Agent 5" in agent_system_prompt: return '{"overall_evidence_quality": "MEDIUM", "verified_top_issues": ["Gouvernance instable"]}'
+
+    if "Agent 6" in agent_system_prompt:
+        return '{"decision_intelligence": "VOIR SCORE", "executive_summary": "Rapport généré hors-ligne pour valider l\'architecture."}'
+
+if "anthropic" not in sys.modules:
+    class MockMessageContent:
+        def __init__(self, text): self.text = text
+    class MockMessageResponse:
+        def __init__(self, text): self.content = [MockMessageContent(text)]
+    class MockAnthropicClient:
+        def __init__(self, **kwargs):
+            class MsgAPI:
+                def create(self, system, messages, **kwargs):
+                    time.sleep(1) # Simule le délai IA
+                    user_text = messages[0]["content"] if messages else ""
+                    return MockMessageResponse(get_mock_scenario(user_text, system))
+            self.messages = MsgAPI()
+    mock_anthropic = types.ModuleType("anthropic")
+    mock_anthropic.Anthropic = MockAnthropicClient
+    sys.modules["anthropic"] = mock_anthropic
+
+if "httpx" not in sys.modules:
+    mock_httpx = types.ModuleType("httpx")
+    class MockClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, *args, **kwargs):
+            class Resp:
+                def raise_for_status(self): pass
+                def json(self): return {"status": "mocked", "results": []}
+            return Resp()
+    mock_httpx.AsyncClient = MockClient
+    mock_httpx.HTTPError = Exception
+    sys.modules["httpx"] = mock_httpx
+
+def load_agent(name):
+    path = os.path.join(os.getcwd(), f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"backend.agents.{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "backend.agents"
+    sys.modules[f"backend.agents.{name}"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+try:
+    a1 = load_agent("agent_silobreak")
+    a2 = load_agent("agent_legal")
+    a3 = load_agent("agent_executive")
+    a4 = load_agent("agent_operations")
+    a5 = load_agent("agent_evidence")
+    a6 = load_agent("agent_orchestrator")
+except Exception as e:
+    st.error(f"⚠️ Erreur de chargement : {e}")
+    st.stop()
+
+
+# =====================================================================
+# 🎨 INTERFACE & LOGIQUE D'EXÉCUTION ASYNCHRONE SÉCURISÉE
+# =====================================================================
+st.set_page_config(page_title="BNP - Architecture Agents", layout="wide")
+
+st.markdown("""
+<style>
+    .metric-box { background: #1e1e24; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #333; margin-top: 10px;}
+    .metric-title { font-size: 14px; color: #a0a0a0; margin-bottom: 5px; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🧪 Simulateur d'Orchestration Multi-Agents")
+st.markdown("Ce tableau de bord valide le **flux de données** de ton architecture hors-ligne.")
+
+with st.sidebar:
+    st.header("🎯 Scénarios de Test")
+    test_company = st.radio("Cible à analyser :", [
+        "FTX (Scénario : Fraude Majeure)", 
+        "Apple (Scénario : Sain)", 
+        "Tesla (Scénario : Risque Exécutif)"
+    ])
+    run_btn = st.button("▶️ Lancer le Pipeline", type="primary", use_container_width=True)
+
+# ---> LA SOLUTION AU PROBLÈME DE THREAD EST ICI <---
+# On englobe toute l'exécution dans UNE SEULE fonction asynchrone
+async def run_full_pipeline(company):
+    col_flow, col_results = st.columns([1.2, 1])
+    
+    with col_flow:
+        st.subheader("⚙️ Flux d'Orchestration")
+        
+        with st.status(f"Étape 1 : Agent Silobreak (Triage cible : {company})", expanded=True) as s1:
+            triage = await a1.run_silobreak_agent(company, "test.com")
+            st.json(triage, expanded=False)
+            s1.update(label="✅ Agent 1 terminé", state="complete", expanded=False)
+
+        with st.status("Étape 2 : Agents Analytiques (Parallèle)", expanded=True) as s2:
+            st.write("Les agents Légal, Exécutif et Opérations tournent en même temps...")
+            l_task = a2.run_legal_agent(company, triage)
+            e_task = a3.run_executive_agent(company, triage)
+            o_task = a4.run_operations_agent(company, triage)
+            
+            legal, exec_res, ops = await asyncio.gather(l_task, e_task, o_task)
+            
+            c1, c2, c3 = st.columns(3)
+            with c1: st.success(f"⚖️ Légal: {legal.get('legal_risk_score')}")
+            with c2: st.warning(f"👔 Exec: {exec_res.get('combined_score')}")
+            with c3: st.info(f"⚙️ Ops: {ops.get('combined_score')}")
+            s2.update(label="✅ Agents 2, 3, 4 terminés", state="complete", expanded=False)
+
+        with st.status("Étape 3 : Agent Evidence (Fact-Checking)", expanded=True) as s3:
+            evidence = await a5.run_evidence_agent(company, triage, legal, exec_res, ops)
+            st.json(evidence, expanded=False)
+            s3.update(label="✅ Agent 5 terminé", state="complete", expanded=False)
+
+        with st.status("Étape 4 : Agent Orchestrateur (Synthèse)", expanded=True) as s4:
+            st.write("Calcul du score final en cours...")
+            final = await a6.run_orchestrator_agent(company, "test.com", triage, legal, exec_res, ops, evidence)
+            s4.update(label="✅ Agent 6 terminé", state="complete", expanded=False)
+
+    with col_results:
+        st.subheader("📊 Tableau de Bord")
+        
+        score = final.get("cyber_vulnerability_score", 0)
+        risk = final.get("risk_level", "UNKNOWN")
+        color = "#ff4b4b" if risk == "HIGH" else "#ffa500" if risk == "MEDIUM" else "#00a082"
+        
+        # Validation du calcul
+        l_score = legal.get('legal_risk_score', 0)
+        e_score = exec_res.get('combined_score', 0)
+        o_score = ops.get('combined_score', 0)
+        bonus = 5 if evidence.get('overall_evidence_quality') == 'HIGH' else 0
+        math_check = f"({l_score} × 0.35) + ({e_score} × 0.20) + ({o_score} × 0.30) + {bonus}"
+        
+        st.markdown(f"""
+        <div style="text-align:center; padding:30px; border:2px solid {color}; border-radius:10px; background-color:#1e1e1e;">
+            <p style="color:#a0a0a0; margin:0; font-size:18px;">Cyber Vulnerability Score</p>
+            <h1 style="color:{color}; font-size: 60px; margin:0;">{score}/100</h1>
+            <p style="font-size:24px; color:{color}; font-weight:bold;">NIVEAU : {risk}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown(f"""
+        <div class="metric-box">
+            <div class="metric-title">🛠️ Validation du Moteur de Calcul Python</div>
+            <div style="font-size:14px; color:#ddd; font-family:monospace;">{math_check} = {score}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.write("---")
+        st.write("📌 **Preuve du succès architectural :**")
+        st.markdown(f"- L'exécution parallèle a fonctionné (`asyncio.gather`).")
+        st.markdown(f"- Le parsing JSON est robuste (aucun crash).")
+        st.markdown(f"- L'Agent 6 consolide bien les données.")
+
+if run_btn:
+    company = test_company.split(" ")[0]
+    
+    # ⚠️ LA SOLUTION ARCHITECTURALE EST ICI ⚠️
+    # On force la création et l'attachement d'une boucle d'événements au Thread Streamlit.
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # On exécute le tout de manière sécurisée
+    loop.run_until_complete(run_full_pipeline(company))
